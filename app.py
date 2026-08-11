@@ -1,5 +1,4 @@
 import io
-from datetime import datetime
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -233,7 +232,7 @@ if uploaded is not None:
     st.session_state["order_file_bytes"] = file_bytes
     st.session_state["order_file_meta"] = {
         "filename": uploaded.name,
-        "uploaded_at": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        "uploaded_at": storage._now(),
     }
     storage.save_order_file(uploaded)
 
@@ -411,9 +410,19 @@ def render_owner_pivot(sub_df: pd.DataFrame, title: str, subtitle: str = ""):
 render_owner_pivot(df, "CDS Over All")
 
 if owner_map:
+    # Build owner -> sorted list of Sub Dept codes assigned to them, so each
+    # owner's section title can show which Sub Depts they're responsible for.
+    owner_to_subdepts = {}
+    for sd, ow in owner_map.items():
+        owner_to_subdepts.setdefault(ow, []).append(sd)
+    for ow in owner_to_subdepts:
+        owner_to_subdepts[ow] = sorted(owner_to_subdepts[ow], key=lambda x: (len(x), x))
+
     owners_present = [o for o in sorted(df["Owner"].unique()) if o != "ไม่ระบุคนดูแล"]
     for owner in owners_present:
-        render_owner_pivot(df[df["Owner"] == owner], "CDS PICK", owner)
+        sub_depts_str = ", ".join(owner_to_subdepts.get(owner, []))
+        subtitle = f"{owner} (SDEPT: {sub_depts_str})" if sub_depts_str else owner
+        render_owner_pivot(df[df["Owner"] == owner], "CDS PICK", subtitle)
     if "ไม่ระบุคนดูแล" in df["Owner"].unique():
         with st.expander("Sub Dept ที่ยังไม่ได้กำหนดคนดูแล"):
             render_owner_pivot(df[df["Owner"] == "ไม่ระบุคนดูแล"], "ไม่ระบุคนดูแล")
