@@ -91,17 +91,67 @@ def save_owner_map(mapping: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Stock cut-off schedule
+# Stock cut-off schedule (append-only, active entries only)
 # ---------------------------------------------------------------------------
-def save_cutoff_data(df: pd.DataFrame, filename: str) -> None:
+def _today_ts() -> pd.Timestamp:
+    return pd.Timestamp(datetime.now(BANGKOK_TZ).date())
+
+
+def append_cutoff_data(new_df: pd.DataFrame, filename: str) -> dict:
+    """Appends newly-uploaded, still-active cut-off rows onto the existing
+    accumulated dataset, then prunes any row (old or new) whose end date
+    (CutTo) has already passed. Returns a small summary dict for UI feedback.
+    """
+    today = _today_ts()
+
+    new_df = new_df.copy()
+    new_df["CutTo"] = pd.to_datetime(new_df["CutTo"], errors="coerce")
+    new_active = new_df[new_df["CutTo"].notna() & (new_df["CutTo"] >= today)]
+    skipped_expired = len(new_df) - len(new_active)
+
+    existing = load_cutoff_data()
+    combined = pd.concat([existing, new_active], ignore_index=True) if not existing.empty else new_active.copy()
+
+    dedupe_cols = [c for c in ["StoreCode", "SubDept", "CutFrom", "CutTo"] if c in combined.columns]
+    before_dedupe = len(combined)
+    if dedupe_cols:
+        combined = combined.drop_duplicates(subset=dedupe_cols, keep="last")
+    duplicates_removed = before_dedupe - len(combined)
+
+    combined["CutTo"] = pd.to_datetime(combined["CutTo"], errors="coerce")
+    before_prune = len(combined)
+    combined = combined[combined["CutTo"].notna() & (combined["CutTo"] >= today)]
+    expired_pruned = before_prune - len(combined)
+
+    combined = combined.sort_values(["CutTo", "StoreCode", "SubDept"]).reset_index(drop=True)
+
     tmp_path = CUTOFF_FILE.with_suffix(CUTOFF_FILE.suffix + ".tmp")
-    df.to_csv(tmp_path, index=False)
+    combined.to_csv(tmp_path, index=False)
     tmp_path.replace(CUTOFF_FILE)
-    _safe_write_json(CUTOFF_META, {
+
+    meta = _safe_read_json(CUTOFF_META) or {}
+    history = meta.get("upload_history", [])
+    history.append({
         "filename": filename,
         "uploaded_at": _now(),
-        "rows": len(df),
+        "rows_added": len(new_active),
+        "rows_skipped_expired": int(skipped_expired),
     })
+    history = history[-20:]  # keep last 20 uploads only
+    _safe_write_json(CUTOFF_META, {
+        "last_filename": filename,
+        "uploaded_at": _now(),
+        "rows": len(combined),
+        "upload_history": history,
+    })
+
+    return {
+        "rows_added": len(new_active),
+        "rows_skipped_expired": int(skipped_expired),
+        "duplicates_removed": int(duplicates_removed),
+        "expired_pruned": int(expired_pruned),
+        "total_active_rows": len(combined),
+    }
 
 
 def load_cutoff_data() -> pd.DataFrame:
