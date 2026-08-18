@@ -521,6 +521,10 @@ with st.expander("ℹ️ วิธีคำนวณ Final Logic Status"):
 - สถานะอื่นๆ (Allocated, Allocated Partial, Allocated ShortAll, รอยืนยัน, ปิดเอกสาร):
   ตรวจสอบต่อ — `Is Picked = N` → คงสถานะเดิม, `Is Picked = Y` → ตรวจ `Is Scan Load`
   → `N` = `Picked`, `Y` → ตรวจ `Is Shipped` → `N` = `Loaded`, `Y` = `Shipped`
+- **ติด Stock Cutoff ได้เฉพาะงานที่สถานะเป็น `Loaded` เท่านั้น** — งานที่ยังไม่ถึง Loaded (เช่น รอเบิก/Picked)
+  จะไม่ถูกนับเป็น Stock Cutoff แม้ Store/Sub Dept/วันที่จะตรงกับตาราง Cut-off ก็ตาม
+  และระบบเช็คว่า **วันนี้** ยังอยู่ในช่วง Cutoff หรือไม่ (ไม่ใช่แค่ดูวันที่ตั้งใจส่ง) — พ้นช่วงแล้วจะกลับมานับเป็น
+  `Loaded` ปกติทันทีโดยไม่ต้องรออัปเดตข้อมูลใน Settings
 - **Backlog = Total − Cancelled − Stock Cutoff − Shipped** (ไม่รวมรายการที่ถูก Exclude 2 กรณีนี้)
     """)
 
@@ -572,19 +576,36 @@ if isinstance(create_range, tuple) and len(create_range) == 2:
 if isinstance(ship_range, tuple) and len(ship_range) == 2:
     df = df[(df["Start Ship Date"].dt.date >= ship_range[0]) & (df["Start Ship Date"].dt.date <= ship_range[1])]
 
-# -- Stock cut-off flag (based on Start Ship Date, matching Store + Sub Dept) -
+# -- Stock cut-off flag ------------------------------------------------------
+# Only a job that has reached "Loaded" can be stuck on a stock cutoff (it's
+# ready to ship but the store is mid stock-count and can't receive it).
+# Jobs at earlier stages (รอเบิก / Allocated / Picked) are never tagged as
+# Stock Cutoff even if their Store+Sub Dept+date matches a cutoff window —
+# whatever else is blocking them is a separate issue.
+#
+# The match also requires the cutoff window to still be active *today*
+# (CutFrom <= today <= CutTo), not just that the Start Ship Date falls in
+# the window. That way, once the cutoff period ends, the row automatically
+# reverts to being counted as a normal "Loaded" backlog item on the very
+# next page load — no manual cleanup in Settings required.
+today_ts = pd.Timestamp(date.today())
+cutoff_df_active_today = (
+    cutoff_df[(cutoff_df["CutFrom"] <= today_ts) & (today_ts <= cutoff_df["CutTo"])]
+    if not cutoff_df.empty else cutoff_df
+)
+
+
 def compute_cutoff_flag(row, cdf):
+    if row.get("Final Status") != "Loaded":
+        return False
     if cdf.empty or pd.isna(row.get("To Store Str")) or pd.isna(row.get("Sub Dept")):
         return False
     matches = cdf[(cdf["StoreCode"] == str(row["To Store Str"])) & (cdf["SubDept"] == str(row["Sub Dept"]))]
-    if matches.empty or pd.isna(row.get("Start Ship Date")):
-        return False
-    ship_date = row["Start Ship Date"]
-    return bool(((matches["CutFrom"] <= ship_date) & (ship_date <= matches["CutTo"])).any())
+    return not matches.empty
 
 
-if not cutoff_df.empty:
-    df["ติด Stock Cutoff"] = df.apply(lambda r: compute_cutoff_flag(r, cutoff_df), axis=1)
+if not cutoff_df_active_today.empty:
+    df["ติด Stock Cutoff"] = df.apply(lambda r: compute_cutoff_flag(r, cutoff_df_active_today), axis=1)
 else:
     df["ติด Stock Cutoff"] = False
 
