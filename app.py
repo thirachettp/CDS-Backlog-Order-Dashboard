@@ -1,3 +1,4 @@
+import html
 import io
 import re
 from datetime import date
@@ -52,6 +53,23 @@ st.markdown("""
 .subsection-title { font-size: 15px; font-weight: 800; color: #374151; margin: 14px 0 4px 0; }
 .group-title { font-size: 18px; font-weight: 800; color: #DC2626; margin: 18px 0 2px 0; }
 .group-sub { font-size: 14px; font-weight: 700; color: #111827; margin-left: 6px; }
+
+.pivot-wrap { overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 8px; margin: 4px 0 14px 0; }
+.pivot-table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 13px; }
+.pivot-table th, .pivot-table td {
+    padding: 6px 12px; text-align: right; white-space: nowrap; border-bottom: 1px solid #f1f5f9;
+}
+.pivot-table thead th {
+    position: sticky; top: 0; background: #f9fafb; color: #374151; font-weight: 700;
+    border-bottom: 1px solid #e5e7eb; z-index: 1;
+}
+.pivot-table th:first-child, .pivot-table td:first-child { text-align: left; }
+.pivot-table td:last-child, .pivot-table th:last-child { font-weight: 700; }
+.pivot-table tr.pivot-group-header td {
+    background: #eef2ff; padding: 10px 12px; border-top: 2px solid #c7d2fe; border-bottom: none;
+}
+.pivot-table tr.pivot-total td { background: #fde68a; font-weight: 800; }
+.pivot-table tr.pivot-empty td { color: #6b7280; font-style: italic; padding: 10px 12px; }
 .flow-box { background: #EEF2FF; border: 1px solid #C7D2FE; border-radius: 8px; padding: 8px 12px;
             font-weight: 700; font-size: 12px; white-space: nowrap; }
 div.block-container { padding-top: 1.2rem; }
@@ -248,16 +266,16 @@ def parse_order_file(file_bytes: bytes) -> pd.DataFrame:
 
 
 def get_bu_order_df(bu: str):
-    """Returns (df, source_note) for a single BU's saved data only, so the
-    Dashboard always shows exactly one BU's data at a time."""
+    """Returns (df, source_note, meta) for a single BU's saved data only, so
+    the Dashboard always shows exactly one BU's data at a time."""
     if not bu:
-        return None, None
+        return None, None, None
     d = storage.load_order_data(bu)
     if d.empty:
-        return None, None
+        return None, None, None
     meta = storage.load_order_meta(bu) or {}
     note = f"BU: {bu} | ไฟล์ล่าสุด: {meta.get('filename', '-')} (อัปโหลดเมื่อ {meta.get('uploaded_at', '-')}, {meta.get('rows', 0):,} แถว)"
-    return d, note
+    return d, note, meta
 
 
 def pic_for_subdept(sub_dept, owner_map):
@@ -361,7 +379,7 @@ owner_map = storage.load_owner_map()
 cutoff_df = storage.load_cutoff_data()
 cutoff_meta = storage.load_cutoff_meta()
 
-bu_df_for_lookup, _ = get_bu_order_df(selected_bu) if selected_bu else (None, None)
+bu_df_for_lookup, _, _ = get_bu_order_df(selected_bu) if selected_bu else (None, None, None)
 subdept_name_lookup, subdept_name_source = build_subdept_name_lookup(bu_df_for_lookup, cutoff_df)
 
 # ===========================================================================
@@ -523,24 +541,36 @@ uploaded = st.file_uploader(
     "อัปโหลดไฟล์ Excel Order Status by SKU ใหม่ — รองรับหลาย BU: อัปโหลดไฟล์ของ BU ไหนก็ได้ "
     "ระบบจะบันทึกแยกตาม BU ให้อัตโนมัติโดยไม่ทับข้อมูลของ BU อื่นที่เคยอัปโหลดไว้ แล้วเลือก BU ที่ต้องการดูได้จากแถบด้านซ้าย",
     type=["xlsx"],
+    help="รองรับเฉพาะไฟล์รายงาน **031. Order Status by SKU** (.xlsx) ที่ export จากระบบ WMS เท่านั้น "
+         "ไฟล์รูปแบบอื่นอาจอ่านคอลัมน์ไม่ครบหรือคำนวณ Final Status ผิดพลาด",
 )
 if uploaded is not None:
     file_bytes = uploaded.getvalue()
-    new_df = parse_order_file(file_bytes)
-    just_saved_bus = storage.save_order_data(new_df, uploaded.name)
-    st.success(f"บันทึกข้อมูลแล้วสำหรับ BU: {', '.join(just_saved_bus)} ({len(new_df):,} แถว)")
-    if just_saved_bus and st.session_state.get("selected_bu") not in just_saved_bus:
-        st.session_state["selected_bu"] = just_saved_bus[0]
+    # Guard against an infinite rerun loop: the file_uploader widget keeps
+    # returning the same UploadedFile on every rerun until the user removes
+    # it, so only (re)parse + save + rerun once per distinct upload — this
+    # is also what makes the Sub Dept Name lookup below use fresh data on
+    # this same run instead of lagging one page-load behind.
+    file_sig = (uploaded.name, len(file_bytes))
+    if st.session_state.get("_last_uploaded_order_sig") != file_sig:
+        new_df = parse_order_file(file_bytes)
+        just_saved_bus = storage.save_order_data(new_df, uploaded.name)
+        st.session_state["_last_uploaded_order_sig"] = file_sig
+        st.success(f"บันทึกข้อมูลแล้วสำหรับ BU: {', '.join(just_saved_bus)} ({len(new_df):,} แถว)")
+        if just_saved_bus and st.session_state.get("selected_bu") not in just_saved_bus:
+            st.session_state["selected_bu"] = just_saved_bus[0]
         st.rerun()
 
 if not selected_bu:
     st.info("กรุณาอัปโหลดไฟล์ Excel เพื่อเริ่มดู Dashboard")
     st.stop()
 
-df_raw, source_note = get_bu_order_df(selected_bu)
+df_raw, source_note, order_meta = get_bu_order_df(selected_bu)
 if df_raw is None:
     st.info("ไม่พบข้อมูลสำหรับ BU นี้ กรุณาอัปโหลดไฟล์")
     st.stop()
+
+snapshot_upload_label = f"ข้อมูล ณ ไฟล์ที่อัปโหลดเมื่อ {order_meta.get('uploaded_at', '-')}" if order_meta else ""
 
 st.caption(f"{source_note} | แถวข้อมูลทั้งหมด: {len(df_raw):,}")
 
@@ -573,213 +603,12 @@ with st.expander("ℹ️ วิธีคำนวณ Final Logic Status"):
 ถ้าไม่ต้องการให้ ปิดเอกสาร ถูกตัดออกจาก Backlog (แค่อยากเปลี่ยนชื่อโชว์แต่นับเหมือนเดิม) แจ้งได้เลยครับ จะแก้กลับให้
     """)
 
-# ---------------------------------------------------------------------------
-# PART 1: FILTER & KPI CARDS
-# ---------------------------------------------------------------------------
-st.markdown('<div class="section-title">Part 1 · Filter & KPI Cards</div>', unsafe_allow_html=True)
-
-f1, f2, f3, f4, f5 = st.columns(5)
-final_status_options = sorted(df_raw["Final Status"].apply(display_status).dropna().unique().tolist())
-brand_options = sorted(df_raw["Brand"].dropna().unique().tolist())
-store_options = sorted(df_raw["Store Name"].dropna().unique().tolist())
-type_options = sorted(df_raw["Order Type"].dropna().unique().tolist())
-pic_options = sorted(set(owner_map.values())) if owner_map else []
-
-sel_status = f1.multiselect("Status", final_status_options, default=[])
-sel_brand = f2.multiselect("Brand", brand_options, default=[])
-sel_store = f3.multiselect("To Store", store_options, default=[])
-sel_type = f4.multiselect("Order Type", type_options, default=[])
-sel_pic = f5.multiselect("คนดูแล (PIC)", pic_options, default=[]) if pic_options else []
-
-f6, f7 = st.columns(2)
-min_create, max_create = df_raw["Order Create Date"].min(), df_raw["Order Create Date"].max()
-min_ship, max_ship = df_raw["Start Ship Date"].min(), df_raw["Start Ship Date"].max()
-
-create_range = f6.date_input("Order Create Date", value=(),
-                              min_value=min_create.date() if pd.notna(min_create) else None,
-                              max_value=max_create.date() if pd.notna(max_create) else None)
-ship_range = f7.date_input("Start Ship Date", value=(),
-                            min_value=min_ship.date() if pd.notna(min_ship) else None,
-                            max_value=max_ship.date() if pd.notna(max_ship) else None)
-
-df = df_raw.copy()
-df["PIC"] = df["Sub Dept"].apply(lambda sd: pic_for_subdept(sd, owner_map))
-df["SDEPT Name"] = df["Sub Dept"].map(subdept_name_lookup).fillna("")
-df["Status Display"] = df["Final Status"].apply(display_status)
-
-if sel_status:
-    df = df[df["Status Display"].isin(sel_status)]
-if sel_brand:
-    df = df[df["Brand"].isin(sel_brand)]
-if sel_store:
-    df = df[df["Store Name"].isin(sel_store)]
-if sel_type:
-    df = df[df["Order Type"].isin(sel_type)]
-if sel_pic:
-    df = df[df["PIC"].isin(sel_pic)]
-if isinstance(create_range, tuple) and len(create_range) == 2:
-    df = df[(df["Order Create Date"].dt.date >= create_range[0]) & (df["Order Create Date"].dt.date <= create_range[1])]
-if isinstance(ship_range, tuple) and len(ship_range) == 2:
-    df = df[(df["Start Ship Date"].dt.date >= ship_range[0]) & (df["Start Ship Date"].dt.date <= ship_range[1])]
-
-# -- Stock cut-off flag ------------------------------------------------------
-# Only a job that has reached "Loaded" can be stuck on a stock cutoff (it's
-# ready to ship but the store is mid stock-count and can't receive it).
-# Jobs at earlier stages (รอเบิก / Allocated / Picked) are never tagged as
-# Stock Cutoff even if their Store+Sub Dept+date matches a cutoff window —
-# whatever else is blocking them is a separate issue.
-#
-# The match also requires the cutoff window to still be active *today*
-# (CutFrom <= today <= CutTo), not just that the Start Ship Date falls in
-# the window. That way, once the cutoff period ends, the row automatically
-# reverts to being counted as a normal "Loaded" backlog item on the very
-# next page load — no manual cleanup in Settings required.
-today_ts = pd.Timestamp(date.today())
-cutoff_df_active_today = (
-    cutoff_df[(cutoff_df["CutFrom"] <= today_ts) & (today_ts <= cutoff_df["CutTo"])]
-    if not cutoff_df.empty else cutoff_df
-)
-
-
-def compute_cutoff_flag(row, cdf):
-    if row.get("Final Status") != "Loaded":
-        return False
-    if cdf.empty or pd.isna(row.get("To Store Str")) or pd.isna(row.get("Sub Dept")):
-        return False
-    matches = cdf[(cdf["StoreCode"] == str(row["To Store Str"])) & (cdf["SubDept"] == str(row["Sub Dept"]))]
-    return not matches.empty
-
-
-if not cutoff_df_active_today.empty:
-    df["ติด Stock Cutoff"] = df.apply(lambda r: compute_cutoff_flag(r, cutoff_df_active_today), axis=1)
-else:
-    df["ติด Stock Cutoff"] = False
-
-
-# -- Bucket: Cancelled / Shipped / Stock Cutoff (excluded) / Backlog / Ontime -
-# "ปิดเอกสาร" (closed document, never picked) is treated as functionally the
-# same as Cancelled — it's now also shown merged under the "Cancelled" label,
-# so it must be excluded from Backlog the same way, or the numbers wouldn't
-# line up with what's displayed.
-#
-# "Backlog" vs "Ontime": any job that isn't Cancelled/Shipped/Stock-Cutoff is
-# split by whether its Start Ship Date has already passed "today":
-#   - Start Ship Date < today  -> Backlog (เกินกำหนดส่งแล้วแต่ยังไม่ Shipped)
-#   - Start Ship Date >= today, or no date at all -> Ontime (ยังอยู่ในเวลา)
-today_date = date.today()
-
-
-def compute_bucket(row):
-    if row["Final Status"] in ("Cancelled", "ปิดเอกสาร"):
-        return "Cancelled"
-    if row["Final Status"] == "Shipped":
-        return "Shipped"
-    if row["ติด Stock Cutoff"]:
-        return "Stock Cutoff"
-    ship_date = row.get("Start Ship Date")
-    if pd.notna(ship_date) and ship_date.date() < today_date:
-        return "Backlog"
-    return "Ontime"
-
-
-df["Bucket"] = df.apply(compute_bucket, axis=1)
-
-df_backlog = df[df["Bucket"] == "Backlog"]
-df_ontime = df[df["Bucket"] == "Ontime"]
-df_cancelled = df[df["Bucket"] == "Cancelled"]
-df_cutoff_excluded = df[df["Bucket"] == "Stock Cutoff"]
-df_shipped = df[df["Bucket"] == "Shipped"]
-
-total_orders = df["Order No."].nunique()
-total_pcs = df["Required QTY"].sum()
-
-
-def orders_pcs(sub_df):
-    return sub_df["Order No."].nunique(), sub_df["Required QTY"].sum()
-
-
-backlog_orders, backlog_pcs = orders_pcs(df_backlog)
-ontime_orders, ontime_pcs = orders_pcs(df_ontime)
-cancelled_orders, cancelled_pcs = orders_pcs(df_cancelled)
-cutoff_orders, cutoff_pcs = orders_pcs(df_cutoff_excluded)
-shipped_orders, shipped_pcs = orders_pcs(df_shipped)
-
-waiting_df = df_backlog[df_backlog["Final Status"] == WAITING_LABEL]
-allocated_df = df_backlog[df_backlog["Final Status"].isin(ALLOCATED_LABELS)]
-picked_df = df_backlog[df_backlog["Final Status"] == "Picked"]
-loaded_df = df_backlog[df_backlog["Final Status"] == "Loaded"]
-
-waiting_o, waiting_p = orders_pcs(waiting_df)
-allocated_o, allocated_p = orders_pcs(allocated_df)
-picked_o, picked_p = orders_pcs(picked_df)
-loaded_o, loaded_p = orders_pcs(loaded_df)
-
-# -- Headline row: Total Orders / Backlog / Ontime / รอเบิก ------------------
-r1c1, r1c2, r1c3, r1c4 = st.columns(4)
-with r1c1:
-    dual_kpi_card("Total Orders / Jobs", total_orders, 100.0, total_pcs, 100.0, CARD_COLORS[0], headline=True)
-with r1c2:
-    dual_kpi_card("Backlog (เกินกำหนด)", backlog_orders, pct(backlog_orders, total_orders), backlog_pcs,
-                  pct(backlog_pcs, total_pcs), CARD_COLORS[1], headline=True)
-with r1c3:
-    dual_kpi_card("Ontime (ยังไม่เกินกำหนด)", ontime_orders, pct(ontime_orders, total_orders), ontime_pcs,
-                  pct(ontime_pcs, total_pcs), "#0EA5E9", headline=True)
-with r1c4:
-    dual_kpi_card("Not Printed", waiting_o, pct(waiting_o, total_orders), waiting_p, pct(waiting_p, total_pcs), CARD_COLORS[2])
-
-# -- Stage row: Released / Picked / Loaded / Shipped ------------------------
-r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-with r2c1:
-    dual_kpi_card("Released", allocated_o, pct(allocated_o, total_orders), allocated_p,
-                  pct(allocated_p, total_pcs), CARD_COLORS[3])
-with r2c2:
-    dual_kpi_card("Picked", picked_o, pct(picked_o, total_orders), picked_p, pct(picked_p, total_pcs), CARD_COLORS[4])
-with r2c3:
-    dual_kpi_card("Loaded", loaded_o, pct(loaded_o, total_orders), loaded_p, pct(loaded_p, total_pcs), CARD_COLORS[5])
-with r2c4:
-    dual_kpi_card("Shipped", shipped_orders, pct(shipped_orders, total_orders), shipped_pcs,
-                  pct(shipped_pcs, total_pcs), CARD_COLORS[6])
-
-# -- Excluded row: Cancelled / Stock Cutoff ----------------------------------
-st.markdown('<div class="subsection-title">ไม่รวมใน Backlog (Excluded)</div>', unsafe_allow_html=True)
-r3c1, r3c2 = st.columns(2)
-with r3c1:
-    dual_kpi_card("Cancelled", cancelled_orders, pct(cancelled_orders, total_orders), cancelled_pcs,
-                  pct(cancelled_pcs, total_pcs), "#9CA3AF", muted=True)
-with r3c2:
-    dual_kpi_card("Stock Cutoff", cutoff_orders, pct(cutoff_orders, total_orders), cutoff_pcs,
-                  pct(cutoff_pcs, total_pcs), "#9CA3AF", muted=True)
-
-exp_c1, exp_c2, exp_c3 = st.columns(3)
-with exp_c1:
-    with st.expander(f"👁️ ดูรายการ Cancelled ({cancelled_orders:,} orders)"):
-        cols_show = [c for c in ["Order No.", "Store Name", "Sub Dept", "SDEPT Name", "Status", "Required QTY"]
-                     if c in df_cancelled.columns]
-        st.dataframe(df_cancelled[cols_show], width='stretch', height=250, hide_index=True)
-with exp_c2:
-    with st.expander(f"👁️ ดูรายการ Stock Cutoff ({cutoff_orders:,} orders)"):
-        cols_show = [c for c in ["Order No.", "Store Name", "Sub Dept", "SDEPT Name", "Status", "Start Ship Date",
-                                  "Required QTY"] if c in df_cutoff_excluded.columns]
-        st.dataframe(df_cutoff_excluded[cols_show], width='stretch', height=250, hide_index=True)
-with exp_c3:
-    with st.expander(f"👁️ ดูรายการ Ontime ({ontime_orders:,} orders)"):
-        cols_show = [c for c in ["Order No.", "Store Name", "Sub Dept", "SDEPT Name", "Status", "Start Ship Date",
-                                  "Required QTY"] if c in df_ontime.columns]
-        st.dataframe(df_ontime[cols_show], width='stretch', height=250, hide_index=True)
-
-st.markdown("---")
-
-# ---------------------------------------------------------------------------
-# PART 2: BACKLOG ตามคนดูแล (PIC) — by Start Ship Date
-# ---------------------------------------------------------------------------
-st.markdown('<div class="section-title">Part 2 · Backlog ตามคนดูแล</div>', unsafe_allow_html=True)
-st.caption("นับเฉพาะรายการที่อยู่ใน Backlog **ที่เกินกำหนดส่งแล้ว** (ไม่รวม Cancelled / Stock Cutoff / Shipped / Ontime) "
-           "จัดกลุ่มตามวันที่ **Start Ship Date**")
-
-part2_snapshot_btn = st.columns([1, 5])[0]
-with part2_snapshot_btn:
+# -- Global "Download Snapshot" button — captures Part 1 + 2 + 3 + 4 as one
+# single image (everything inside dashboard_container below). -------------
+dashboard_snapshot_btn = st.columns([1, 5])[0]
+with dashboard_snapshot_btn:
     st.iframe(height=50, src="""
-    <button id="p2-snapshot-btn" style="
+    <button id="dash-snapshot-btn" style="
         background:#6C5CE7;color:#fff;border:none;border-radius:8px;
         padding:8px 14px;font-weight:700;font-size:13px;cursor:pointer;width:100%;">
         📷 Download Snapshot
@@ -796,7 +625,7 @@ with part2_snapshot_btn:
         doc.head.appendChild(s);
       });
     }
-    const btn = document.getElementById('p2-snapshot-btn');
+    const btn = document.getElementById('dash-snapshot-btn');
     btn.addEventListener('click', async () => {
       const originalText = btn.innerText;
       btn.innerText = '⏳ กำลังสร้างรูปภาพ...';
@@ -804,13 +633,13 @@ with part2_snapshot_btn:
       try {
         const html2canvas = await loadHtml2Canvas();
         const doc = window.parent.document;
-        const marker = doc.getElementById('part2-snapshot-marker');
-        if (!marker) { alert('ไม่พบส่วน Part 2 ในหน้า กรุณาลองรีเฟรชหน้าเว็บ'); return; }
+        const marker = doc.getElementById('dashboard-snapshot-marker');
+        if (!marker) { alert('ไม่พบเนื้อหา Dashboard ในหน้า กรุณาลองรีเฟรชหน้าเว็บ'); return; }
         const container = marker.closest('[data-testid="stVerticalBlock"]');
         const target = container || marker.parentElement;
         const canvas = await html2canvas(target, {backgroundColor: '#ffffff', scale: 2, useCORS: true});
         const link = doc.createElement('a');
-        link.download = 'backlog_by_pic_snapshot.png';
+        link.download = 'backlog_dashboard_snapshot.png';
         link.href = canvas.toDataURL('image/png');
         doc.body.appendChild(link);
         link.click();
@@ -825,203 +654,442 @@ with part2_snapshot_btn:
     </script>
     """)
 
-part2_container = st.container()
+dashboard_container = st.container()
 
-with part2_container:
+with dashboard_container:
     # Invisible marker — lets the "Download Snapshot" button (above) find the
-    # DOM node that wraps this whole Part 2 section, so it can screenshot
-    # exactly this container and nothing else.
-    st.markdown('<div id="part2-snapshot-marker"></div>', unsafe_allow_html=True)
+    # single DOM node that wraps Part 1 through Part 4, so it can screenshot
+    # exactly that region (and nothing from Settings/sidebar) as one image.
+    st.markdown('<div id="dashboard-snapshot-marker"></div>', unsafe_allow_html=True)
+    if snapshot_upload_label:
+        st.caption(f"📅 {snapshot_upload_label} — ข้อความนี้จะติดไปกับรูป Snapshot ด้วย")
 
-    metric_choice = st.radio("แสดงค่าด้วย", ["Required QTY (ผลรวม)", "จำนวน Order (ไม่ซ้ำ)"],
-                              horizontal=True, key="part2_metric")
-    value_col = "Required QTY" if metric_choice.startswith("Required") else "Order No."
-    agg_func = "sum" if value_col == "Required QTY" else "nunique"
+    # -----------------------------------------------------------------------
+    # PART 1: FILTER & KPI CARDS
+    # -----------------------------------------------------------------------
+    st.markdown('<div class="section-title">Part 1 · Filter & KPI Cards</div>', unsafe_allow_html=True)
 
-    def render_owner_pivot(sub_df: pd.DataFrame, title: str, subtitle: str = ""):
-        header_html = f'<div class="group-title">{title}'
-        if subtitle:
-            header_html += f'<span class="group-sub">{subtitle}</span>'
-        header_html += '</div>'
-        st.markdown(header_html, unsafe_allow_html=True)
+    f1, f2, f3, f4, f5 = st.columns(5)
+    final_status_options = sorted(df_raw["Final Status"].apply(display_status).dropna().unique().tolist())
+    brand_options = sorted(df_raw["Brand"].dropna().unique().tolist())
+    store_options = sorted(df_raw["Store Name"].dropna().unique().tolist())
+    type_options = sorted(df_raw["Order Type"].dropna().unique().tolist())
+    pic_options = sorted(set(owner_map.values())) if owner_map else []
 
-        if sub_df.empty:
-            st.caption("ไม่มีข้อมูลในกลุ่มนี้")
-            return
+    sel_status = f1.multiselect("Status", final_status_options, default=[])
+    sel_brand = f2.multiselect("Brand", brand_options, default=[])
+    sel_store = f3.multiselect("To Store", store_options, default=[])
+    sel_type = f4.multiselect("Order Type", type_options, default=[])
+    sel_pic = f5.multiselect("คนดูแล (PIC)", pic_options, default=[]) if pic_options else []
 
-        dated = sub_df.dropna(subset=["Start Ship Date"]).copy()
-        if dated.empty:
-            st.caption("ไม่มีข้อมูลวันที่ในกลุ่มนี้")
-            return
-        dated["Date"] = dated["Start Ship Date"].dt.date
+    f6, f7 = st.columns(2)
+    min_create, max_create = df_raw["Order Create Date"].min(), df_raw["Order Create Date"].max()
+    min_ship, max_ship = df_raw["Start Ship Date"].min(), df_raw["Start Ship Date"].max()
 
-        pivot = pd.pivot_table(dated, index="Status Display", columns="Date", values=value_col,
-                                aggfunc=agg_func, fill_value=0)
+    create_range = f6.date_input("Order Create Date", value=(),
+                                  min_value=min_create.date() if pd.notna(min_create) else None,
+                                  max_value=max_create.date() if pd.notna(max_create) else None)
+    ship_range = f7.date_input("Start Ship Date", value=(),
+                                min_value=min_ship.date() if pd.notna(min_ship) else None,
+                                max_value=max_ship.date() if pd.notna(max_ship) else None)
 
-        status_order = [s for s in STATUS_DISPLAY_ORDER if s in pivot.index] + \
-                       [s for s in pivot.index if s not in STATUS_DISPLAY_ORDER]
-        pivot = pivot.reindex(status_order)
+    df = df_raw.copy()
+    df["PIC"] = df["Sub Dept"].apply(lambda sd: pic_for_subdept(sd, owner_map))
+    df["SDEPT Name"] = df["Sub Dept"].map(subdept_name_lookup).fillna("")
+    df["Status Display"] = df["Final Status"].apply(display_status)
 
-        date_cols = sorted(pivot.columns)
-        pivot = pivot[date_cols]
-        pivot["Total"] = pivot.sum(axis=1)
+    if sel_status:
+        df = df[df["Status Display"].isin(sel_status)]
+    if sel_brand:
+        df = df[df["Brand"].isin(sel_brand)]
+    if sel_store:
+        df = df[df["Store Name"].isin(sel_store)]
+    if sel_type:
+        df = df[df["Order Type"].isin(sel_type)]
+    if sel_pic:
+        df = df[df["PIC"].isin(sel_pic)]
+    if isinstance(create_range, tuple) and len(create_range) == 2:
+        df = df[(df["Order Create Date"].dt.date >= create_range[0]) & (df["Order Create Date"].dt.date <= create_range[1])]
+    if isinstance(ship_range, tuple) and len(ship_range) == 2:
+        df = df[(df["Start Ship Date"].dt.date >= ship_range[0]) & (df["Start Ship Date"].dt.date <= ship_range[1])]
 
-        total_row = pivot.sum(axis=0)
-        total_row.name = "Total"
-        pivot = pd.concat([pivot, total_row.to_frame().T])
+    # -- Stock cut-off flag ------------------------------------------------------
+    # Only a job that has reached "Loaded" can be stuck on a stock cutoff (it's
+    # ready to ship but the store is mid stock-count and can't receive it).
+    # Jobs at earlier stages (รอเบิก / Allocated / Picked) are never tagged as
+    # Stock Cutoff even if their Store+Sub Dept+date matches a cutoff window —
+    # whatever else is blocking them is a separate issue.
+    #
+    # The match also requires the cutoff window to still be active *today*
+    # (CutFrom <= today <= CutTo), not just that the Start Ship Date falls in
+    # the window. That way, once the cutoff period ends, the row automatically
+    # reverts to being counted as a normal "Loaded" backlog item on the very
+    # next page load — no manual cleanup in Settings required.
+    today_ts = pd.Timestamp(date.today())
+    cutoff_df_active_today = (
+        cutoff_df[(cutoff_df["CutFrom"] <= today_ts) & (today_ts <= cutoff_df["CutTo"])]
+        if not cutoff_df.empty else cutoff_df
+    )
 
-        display_pivot = pivot.copy()
-        display_pivot.columns = [date_col_label(c) if c != "Total" else "Total" for c in display_pivot.columns]
+
+    def compute_cutoff_flag(row, cdf):
+        if row.get("Final Status") != "Loaded":
+            return False
+        if cdf.empty or pd.isna(row.get("To Store Str")) or pd.isna(row.get("Sub Dept")):
+            return False
+        matches = cdf[(cdf["StoreCode"] == str(row["To Store Str"])) & (cdf["SubDept"] == str(row["Sub Dept"]))]
+        return not matches.empty
+
+
+    if not cutoff_df_active_today.empty:
+        df["ติด Stock Cutoff"] = df.apply(lambda r: compute_cutoff_flag(r, cutoff_df_active_today), axis=1)
+    else:
+        df["ติด Stock Cutoff"] = False
+
+
+    # -- Bucket: Cancelled / Shipped / Stock Cutoff (excluded) / Backlog / Ontime -
+    # "ปิดเอกสาร" (closed document, never picked) is treated as functionally the
+    # same as Cancelled — it's now also shown merged under the "Cancelled" label,
+    # so it must be excluded from Backlog the same way, or the numbers wouldn't
+    # line up with what's displayed.
+    #
+    # "Backlog" vs "Ontime": any job that isn't Cancelled/Shipped/Stock-Cutoff is
+    # split by whether its Start Ship Date has already passed "today":
+    #   - Start Ship Date < today  -> Backlog (เกินกำหนดส่งแล้วแต่ยังไม่ Shipped)
+    #   - Start Ship Date >= today, or no date at all -> Ontime (ยังอยู่ในเวลา)
+    today_date = date.today()
+
+
+    def compute_bucket(row):
+        if row["Final Status"] in ("Cancelled", "ปิดเอกสาร"):
+            return "Cancelled"
+        if row["Final Status"] == "Shipped":
+            return "Shipped"
+        if row["ติด Stock Cutoff"]:
+            return "Stock Cutoff"
+        ship_date = row.get("Start Ship Date")
+        if pd.notna(ship_date) and ship_date.date() < today_date:
+            return "Backlog"
+        return "Ontime"
+
+
+    df["Bucket"] = df.apply(compute_bucket, axis=1)
+
+    df_backlog = df[df["Bucket"] == "Backlog"]
+    df_ontime = df[df["Bucket"] == "Ontime"]
+    df_cancelled = df[df["Bucket"] == "Cancelled"]
+    df_cutoff_excluded = df[df["Bucket"] == "Stock Cutoff"]
+    df_shipped = df[df["Bucket"] == "Shipped"]
+
+    total_orders = df["Order No."].nunique()
+    total_pcs = df["Required QTY"].sum()
+
+
+    def orders_pcs(sub_df):
+        return sub_df["Order No."].nunique(), sub_df["Required QTY"].sum()
+
+
+    backlog_orders, backlog_pcs = orders_pcs(df_backlog)
+    ontime_orders, ontime_pcs = orders_pcs(df_ontime)
+    cancelled_orders, cancelled_pcs = orders_pcs(df_cancelled)
+    cutoff_orders, cutoff_pcs = orders_pcs(df_cutoff_excluded)
+    shipped_orders, shipped_pcs = orders_pcs(df_shipped)
+
+    waiting_df = df_backlog[df_backlog["Final Status"] == WAITING_LABEL]
+    allocated_df = df_backlog[df_backlog["Final Status"].isin(ALLOCATED_LABELS)]
+    picked_df = df_backlog[df_backlog["Final Status"] == "Picked"]
+    loaded_df = df_backlog[df_backlog["Final Status"] == "Loaded"]
+
+    waiting_o, waiting_p = orders_pcs(waiting_df)
+    allocated_o, allocated_p = orders_pcs(allocated_df)
+    picked_o, picked_p = orders_pcs(picked_df)
+    loaded_o, loaded_p = orders_pcs(loaded_df)
+
+    # -- Headline row: Total Orders / Backlog / Ontime / รอเบิก ------------------
+    r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+    with r1c1:
+        dual_kpi_card("Total Orders / Jobs", total_orders, 100.0, total_pcs, 100.0, CARD_COLORS[0], headline=True)
+    with r1c2:
+        dual_kpi_card("Backlog (เกินกำหนด)", backlog_orders, pct(backlog_orders, total_orders), backlog_pcs,
+                      pct(backlog_pcs, total_pcs), CARD_COLORS[1], headline=True)
+    with r1c3:
+        dual_kpi_card("Ontime (ยังไม่เกินกำหนด)", ontime_orders, pct(ontime_orders, total_orders), ontime_pcs,
+                      pct(ontime_pcs, total_pcs), "#0EA5E9", headline=True)
+    with r1c4:
+        dual_kpi_card("Not Printed", waiting_o, pct(waiting_o, total_orders), waiting_p, pct(waiting_p, total_pcs), CARD_COLORS[2])
+
+    # -- Stage row: Released / Picked / Loaded / Shipped ------------------------
+    r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+    with r2c1:
+        dual_kpi_card("Released", allocated_o, pct(allocated_o, total_orders), allocated_p,
+                      pct(allocated_p, total_pcs), CARD_COLORS[3])
+    with r2c2:
+        dual_kpi_card("Picked", picked_o, pct(picked_o, total_orders), picked_p, pct(picked_p, total_pcs), CARD_COLORS[4])
+    with r2c3:
+        dual_kpi_card("Loaded", loaded_o, pct(loaded_o, total_orders), loaded_p, pct(loaded_p, total_pcs), CARD_COLORS[5])
+    with r2c4:
+        dual_kpi_card("Shipped", shipped_orders, pct(shipped_orders, total_orders), shipped_pcs,
+                      pct(shipped_pcs, total_pcs), CARD_COLORS[6])
+
+    # -- Excluded row: Cancelled / Stock Cutoff ----------------------------------
+    st.markdown('<div class="subsection-title">ไม่รวมใน Backlog (Excluded)</div>', unsafe_allow_html=True)
+    r3c1, r3c2 = st.columns(2)
+    with r3c1:
+        dual_kpi_card("Cancelled", cancelled_orders, pct(cancelled_orders, total_orders), cancelled_pcs,
+                      pct(cancelled_pcs, total_pcs), "#9CA3AF", muted=True)
+    with r3c2:
+        dual_kpi_card("Stock Cutoff", cutoff_orders, pct(cutoff_orders, total_orders), cutoff_pcs,
+                      pct(cutoff_pcs, total_pcs), "#9CA3AF", muted=True)
+
+    exp_c1, exp_c2, exp_c3 = st.columns(3)
+    with exp_c1:
+        with st.expander(f"👁️ ดูรายการ Cancelled ({cancelled_orders:,} orders)"):
+            cols_show = [c for c in ["Order No.", "Store Name", "Sub Dept", "SDEPT Name", "Status", "Required QTY"]
+                         if c in df_cancelled.columns]
+            st.dataframe(df_cancelled[cols_show], width='stretch', height=250, hide_index=True)
+    with exp_c2:
+        with st.expander(f"👁️ ดูรายการ Stock Cutoff ({cutoff_orders:,} orders)"):
+            cols_show = [c for c in ["Order No.", "Store Name", "Sub Dept", "SDEPT Name", "Status", "Start Ship Date",
+                                      "Required QTY"] if c in df_cutoff_excluded.columns]
+            st.dataframe(df_cutoff_excluded[cols_show], width='stretch', height=250, hide_index=True)
+    with exp_c3:
+        with st.expander(f"👁️ ดูรายการ Ontime ({ontime_orders:,} orders)"):
+            cols_show = [c for c in ["Order No.", "Store Name", "Sub Dept", "SDEPT Name", "Status", "Start Ship Date",
+                                      "Required QTY"] if c in df_ontime.columns]
+            st.dataframe(df_ontime[cols_show], width='stretch', height=250, hide_index=True)
+
+    st.markdown("---")
+
+    # ---------------------------------------------------------------------------
+    # PART 2: BACKLOG ตามคนดูแล (PIC) — by Start Ship Date
+    # ---------------------------------------------------------------------------
+    st.markdown('<div class="section-title">Part 2 · Backlog ตามคนดูแล</div>', unsafe_allow_html=True)
+    st.caption("นับเฉพาะรายการที่อยู่ใน Backlog **ที่เกินกำหนดส่งแล้ว** (ไม่รวม Cancelled / Stock Cutoff / Shipped / Ontime) "
+               "จัดกลุ่มตามวันที่ **Start Ship Date**")
+
+    part2_container = st.container()
+
+    with part2_container:
+        metric_choice = st.radio("แสดงค่าด้วย", ["Required QTY (ผลรวม)", "จำนวน Order (ไม่ซ้ำ)"],
+                                  horizontal=True, key="part2_metric")
+        value_col = "Required QTY" if metric_choice.startswith("Required") else "Order No."
+        agg_func = "sum" if value_col == "Required QTY" else "nunique"
+
+        # All groups (Over All + every PIC) share this SAME set of date
+        # columns — derived once from the whole Backlog, not per-group — so
+        # every table lines up column-for-column and can live inside one
+        # combined <table> with a single, synced horizontal scrollbar.
+        backlog_dated = df_backlog.dropna(subset=["Start Ship Date"])
+        all_date_cols = sorted(backlog_dated["Start Ship Date"].dt.date.unique()) if not backlog_dated.empty else []
 
         def fmt(v):
             return "-" if v == 0 else f"{v:,.0f}"
 
-        styled = display_pivot.style.format(fmt)
-        styled = styled.apply(
-            lambda row: ["background-color:#fde68a; font-weight:800;" if row.name == "Total" else "" for _ in row],
-            axis=1,
-        )
-        styled = styled.set_properties(subset=display_pivot.columns[-1:], **{"font-weight": "700"})
-        st.dataframe(styled, width='stretch')
+        def build_group_pivot(sub_df: pd.DataFrame):
+            """Returns a DataFrame indexed by Status Display + a trailing
+            'Total' row, columns = all_date_cols + 'Total', reindexed onto
+            the shared date_cols so it aligns with every other group. None
+            if this group has no dated rows at all."""
+            dated = sub_df.dropna(subset=["Start Ship Date"]).copy()
+            if dated.empty:
+                return None
+            dated["Date"] = dated["Start Ship Date"].dt.date
+            pivot = pd.pivot_table(dated, index="Status Display", columns="Date", values=value_col,
+                                    aggfunc=agg_func, fill_value=0)
+            pivot = pivot.reindex(columns=all_date_cols, fill_value=0)
+            status_order = [s for s in STATUS_DISPLAY_ORDER if s in pivot.index] + \
+                           [s for s in pivot.index if s not in STATUS_DISPLAY_ORDER]
+            pivot = pivot.reindex(status_order, fill_value=0)
+            pivot["Total"] = pivot.sum(axis=1)
+            total_row = pivot.sum(axis=0)
+            total_row.name = "Total"
+            return pd.concat([pivot, total_row.to_frame().T])
 
-    render_owner_pivot(df_backlog, f"{selected_bu} Over All")
+        def group_rows_html(sub_df: pd.DataFrame, title: str, subtitle: str = "") -> str:
+            n_cols = len(all_date_cols) + 2  # Status + date cols + Total
+            header = f'<tr class="pivot-group-header"><td colspan="{n_cols}">'
+            header += f'<span style="color:#DC2626;font-weight:800;font-size:14px;">{title}</span>'
+            if subtitle:
+                header += f'<span style="color:#111827;font-weight:700;font-size:13px;margin-left:8px;">{subtitle}</span>'
+            header += '</td></tr>'
 
-    if owner_map:
-        # Build PIC -> sorted list of Sub Dept codes assigned to them, so each
-        # PIC's section title can show which Sub Depts they're responsible
-        # for — including each Sub Dept's descriptive name, not just its
-        # raw code, so the header is actually readable.
-        pic_to_subdepts = {}
-        for sd, ow in owner_map.items():
-            pic_to_subdepts.setdefault(ow, []).append(sd)
-        for ow in pic_to_subdepts:
-            pic_to_subdepts[ow] = sorted(pic_to_subdepts[ow], key=lambda x: (len(x), x))
+            if sub_df.empty:
+                return header + f'<tr class="pivot-empty"><td colspan="{n_cols}">ไม่มีข้อมูลในกลุ่มนี้</td></tr>'
 
-        def _sd_label(sd: str) -> str:
-            name = subdept_name_lookup.get(sd, "")
-            return f"{sd} - {name}" if name else sd
+            pivot = build_group_pivot(sub_df)
+            if pivot is None:
+                return header + f'<tr class="pivot-empty"><td colspan="{n_cols}">ไม่มีข้อมูลวันที่ในกลุ่มนี้</td></tr>'
 
-        pics_present = [o for o in sorted(df_backlog["PIC"].unique()) if o != "ไม่ระบุคนดูแล"]
-        for pic in pics_present:
-            sub_depts_str = ", ".join(_sd_label(sd) for sd in pic_to_subdepts.get(pic, []))
-            subtitle = f"{pic} (SDEPT: {sub_depts_str})" if sub_depts_str else pic
-            render_owner_pivot(df_backlog[df_backlog["PIC"] == pic], f"{selected_bu} PICK", subtitle)
-        if "ไม่ระบุคนดูแล" in df_backlog["PIC"].unique():
-            with st.expander("Sub Dept ที่ยังไม่ได้กำหนดคนดูแล"):
-                render_owner_pivot(df_backlog[df_backlog["PIC"] == "ไม่ระบุคนดูแล"], "ไม่ระบุคนดูแล")
-    else:
-        st.info("ยังไม่ได้ตั้งค่าคนดูแล Sub Dept — ไปที่เมนู ⚙️ Settings เพื่อกำหนดคนดูแลแต่ละ Sub Dept")
+            body_rows = []
+            for status_name, row in pivot.iterrows():
+                cls = "pivot-total" if status_name == "Total" else ""
+                cells = f'<td>{status_name}</td>'
+                for d in all_date_cols:
+                    cells += f'<td>{fmt(row[d])}</td>'
+                cells += f'<td>{fmt(row["Total"])}</td>'
+                body_rows.append(f'<tr class="{cls}">{cells}</tr>')
 
-st.markdown("---")
+            return header + "".join(body_rows)
 
-# ---------------------------------------------------------------------------
-# PART 3: BACKLOG ITEMS DETAILS
-# ---------------------------------------------------------------------------
-st.markdown('<div class="section-title">Part 3 · Backlog Items Details</div>', unsafe_allow_html=True)
-st.caption("แสดงเฉพาะรายการที่อยู่ใน Backlog **ที่เกินกำหนดส่งแล้ว** (ไม่รวม Cancelled / Stock Cutoff / Shipped / Ontime)")
+        def render_pivot_table(groups: list) -> None:
+            """groups: list of (sub_df, title, subtitle) tuples, all sharing
+            all_date_cols, rendered as ONE <table> so scrolling any part of
+            it scrolls every group at once."""
+            date_headers = "".join(f'<th>{date_col_label(d)}</th>' for d in all_date_cols)
+            html = ['<div class="pivot-wrap"><table class="pivot-table"><thead><tr>',
+                    '<th>Status</th>', date_headers, '<th>Total</th>',
+                    '</tr></thead><tbody>']
+            for sub_df, title, subtitle in groups:
+                html.append(group_rows_html(sub_df, title, subtitle))
+            html.append('</tbody></table></div>')
+            st.markdown("".join(html), unsafe_allow_html=True)
 
-p3_status_opts = sorted(df_backlog["Status Display"].dropna().unique().tolist())
-p3_store_opts = sorted(df_backlog["Store Name"].dropna().unique().tolist())
-p3_brand_opts = sorted(df_backlog["Brand"].dropna().unique().tolist())
-p3_sdept_opts = sorted(df_backlog["Sub Dept"].dropna().unique().tolist())
-p3_pic_opts = sorted(df_backlog["PIC"].dropna().unique().tolist())
+        if not all_date_cols:
+            st.caption("ไม่มีข้อมูลวันที่ Start Ship Date ในข้อมูล Backlog นี้เลย")
+        else:
+            groups = [(df_backlog, f"{selected_bu} Over All", "")]
 
-p3f1, p3f2, p3f3, p3f4, p3f5 = st.columns(5)
-p3_sel_status = p3f1.multiselect("Status", p3_status_opts, default=[], key="p3_status")
-p3_sel_store = p3f2.multiselect("Store", p3_store_opts, default=[], key="p3_store")
-p3_sel_brand = p3f3.multiselect("Brand", p3_brand_opts, default=[], key="p3_brand")
-p3_sel_sdept = p3f4.multiselect("SDEPT", p3_sdept_opts, default=[], key="p3_sdept")
-p3_sel_pic = p3f5.multiselect("คนดูแล (PIC)", p3_pic_opts, default=[], key="p3_pic")
+            if owner_map:
+                # Build PIC -> sorted list of Sub Dept codes assigned to them,
+                # so each PIC's section title can show which Sub Depts they're
+                # responsible for — including each Sub Dept's descriptive
+                # name, not just its raw code, so the header is readable.
+                pic_to_subdepts = {}
+                for sd, ow in owner_map.items():
+                    pic_to_subdepts.setdefault(ow, []).append(sd)
+                for ow in pic_to_subdepts:
+                    pic_to_subdepts[ow] = sorted(pic_to_subdepts[ow], key=lambda x: (len(x), x))
 
-search_term = st.text_input("🔍 Search Order No, Store, IBC...", value="",
-                             placeholder="Search Order No, Store, IBC...")
+                def _sd_label(sd: str) -> str:
+                    name = subdept_name_lookup.get(sd, "")
+                    return f"{sd} - {name}" if name else sd
 
-detail_cols = ["Order No.", "Order Create Date", "Start Ship Date", "Brand", "BU", "To Store", "Store Name",
-                "Status Display", "Sub Dept", "SDEPT Name", "IBC", "PIC",
-                "Required QTY", "Allocated QTY", "Pick QTY"]
-detail_cols = [c for c in detail_cols if c in df_backlog.columns]
+                pics_present = [o for o in sorted(df_backlog["PIC"].unique()) if o != "ไม่ระบุคนดูแล"]
+                for pic in pics_present:
+                    sub_depts_str = ", ".join(_sd_label(sd) for sd in pic_to_subdepts.get(pic, []))
+                    subtitle = f"(SDEPT: {sub_depts_str})" if sub_depts_str else ""
+                    groups.append((df_backlog[df_backlog["PIC"] == pic], f"{selected_bu} PICK — {pic}", subtitle))
 
-p3_df = df_backlog.copy()
-if p3_sel_status:
-    p3_df = p3_df[p3_df["Status Display"].isin(p3_sel_status)]
-if p3_sel_store:
-    p3_df = p3_df[p3_df["Store Name"].isin(p3_sel_store)]
-if p3_sel_brand:
-    p3_df = p3_df[p3_df["Brand"].isin(p3_sel_brand)]
-if p3_sel_sdept:
-    p3_df = p3_df[p3_df["Sub Dept"].isin(p3_sel_sdept)]
-if p3_sel_pic:
-    p3_df = p3_df[p3_df["PIC"].isin(p3_sel_pic)]
+                render_pivot_table(groups)
 
-details = p3_df[detail_cols].copy()
-details = details.rename(columns={"Sub Dept": "SDEPT", "PIC": "คนดูแล (PIC)", "Status Display": "Status"})
+                if "ไม่ระบุคนดูแล" in df_backlog["PIC"].unique():
+                    with st.expander("Sub Dept ที่ยังไม่ได้กำหนดคนดูแล"):
+                        render_pivot_table([(df_backlog[df_backlog["PIC"] == "ไม่ระบุคนดูแล"],
+                                              "ไม่ระบุคนดูแล", "")])
+            else:
+                render_pivot_table(groups)
+                st.info("ยังไม่ได้ตั้งค่าคนดูแล Sub Dept — ไปที่เมนู ⚙️ Settings เพื่อกำหนดคนดูแลแต่ละ Sub Dept")
 
-if search_term:
-    mask = pd.Series(False, index=details.index)
-    for c in ["Order No.", "Store Name", "IBC"]:
-        if c in details.columns:
-            mask |= details[c].astype(str).str.contains(search_term, case=False, na=False)
-    details = details[mask]
+    st.markdown("---")
 
-details_display = details.copy()
-if "Order Create Date" in details_display.columns:
-    details_display["Order Create Date"] = details_display["Order Create Date"].dt.strftime("%d/%m/%Y")
-if "Start Ship Date" in details_display.columns:
-    details_display["Start Ship Date"] = details_display["Start Ship Date"].dt.strftime("%d/%m/%Y")
+    # ---------------------------------------------------------------------------
+    # PART 3: BACKLOG ITEMS DETAILS
+    # ---------------------------------------------------------------------------
+    st.markdown('<div class="section-title">Part 3 · Backlog Items Details</div>', unsafe_allow_html=True)
+    st.caption("แสดงเฉพาะรายการที่อยู่ใน Backlog **ที่เกินกำหนดส่งแล้ว** (ไม่รวม Cancelled / Stock Cutoff / Shipped / Ontime)")
 
-st.caption(f"แสดง {len(details_display):,} แถว")
-st.dataframe(details_display, width='stretch', height=420, hide_index=True)
+    p3_status_opts = sorted(df_backlog["Status Display"].dropna().unique().tolist())
+    p3_store_opts = sorted(df_backlog["Store Name"].dropna().unique().tolist())
+    p3_brand_opts = sorted(df_backlog["Brand"].dropna().unique().tolist())
+    p3_sdept_opts = sorted(df_backlog["Sub Dept"].dropna().unique().tolist())
+    p3_pic_opts = sorted(df_backlog["PIC"].dropna().unique().tolist())
 
-excel_bytes = to_excel_bytes(details_display)
-st.download_button("⬇️ Export Table Details (Excel)", data=excel_bytes,
-                    file_name="backlog_items_details.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    p3f1, p3f2, p3f3, p3f4, p3f5 = st.columns(5)
+    p3_sel_status = p3f1.multiselect("Status", p3_status_opts, default=[], key="p3_status")
+    p3_sel_store = p3f2.multiselect("Store", p3_store_opts, default=[], key="p3_store")
+    p3_sel_brand = p3f3.multiselect("Brand", p3_brand_opts, default=[], key="p3_brand")
+    p3_sel_sdept = p3f4.multiselect("SDEPT", p3_sdept_opts, default=[], key="p3_sdept")
+    p3_sel_pic = p3f5.multiselect("คนดูแล (PIC)", p3_pic_opts, default=[], key="p3_pic")
 
-st.markdown("---")
+    search_term = st.text_input("🔍 Search Order No, Store, IBC...", value="",
+                                 placeholder="Search Order No, Store, IBC...")
 
-# ---------------------------------------------------------------------------
-# PART 4: DASHBOARD (CHARTS)
-# ---------------------------------------------------------------------------
-st.markdown('<div class="section-title">Part 4 · Dashboard</div>', unsafe_allow_html=True)
-st.caption("ข้อมูลในทุกกราฟด้านล่างนับเฉพาะ Backlog **ที่เกินกำหนดส่งแล้ว** เช่นกัน")
+    detail_cols = ["Order No.", "Order Create Date", "Start Ship Date", "Brand", "BU", "To Store", "Store Name",
+                    "Status Display", "Sub Dept", "SDEPT Name", "IBC", "PIC",
+                    "Required QTY", "Allocated QTY", "Pick QTY"]
+    detail_cols = [c for c in detail_cols if c in df_backlog.columns]
 
-col1, col2 = st.columns(2)
+    p3_df = df_backlog.copy()
+    if p3_sel_status:
+        p3_df = p3_df[p3_df["Status Display"].isin(p3_sel_status)]
+    if p3_sel_store:
+        p3_df = p3_df[p3_df["Store Name"].isin(p3_sel_store)]
+    if p3_sel_brand:
+        p3_df = p3_df[p3_df["Brand"].isin(p3_sel_brand)]
+    if p3_sel_sdept:
+        p3_df = p3_df[p3_df["Sub Dept"].isin(p3_sel_sdept)]
+    if p3_sel_pic:
+        p3_df = p3_df[p3_df["PIC"].isin(p3_sel_pic)]
 
-status_order_counts = df_backlog.groupby("Status Display")["Order No."].nunique().reset_index(name="Unique Orders")
-status_qty_counts = df_backlog.groupby("Status Display")["Required QTY"].sum().reset_index(name="Required QTY")
+    details = p3_df[detail_cols].copy()
+    details = details.rename(columns={"Sub Dept": "SDEPT", "PIC": "คนดูแล (PIC)", "Status Display": "Status"})
 
-with col1:
-    st.markdown("#### Backlog Orders by Status")
-    fig = go.Figure(data=[go.Pie(
-        labels=status_order_counts["Status Display"], values=status_order_counts["Unique Orders"], hole=0.55,
-        marker=dict(colors=[DONUT_COLORS.get(s, "#9CA3AF") for s in status_order_counts["Status Display"]]))])
-    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=340)
-    st.plotly_chart(fig, width='stretch')
+    if search_term:
+        mask = pd.Series(False, index=details.index)
+        for c in ["Order No.", "Store Name", "IBC"]:
+            if c in details.columns:
+                mask |= details[c].astype(str).str.contains(search_term, case=False, na=False)
+        details = details[mask]
 
-with col2:
-    st.markdown("#### Backlog QTY by Status")
-    fig2 = go.Figure(data=[go.Pie(
-        labels=status_qty_counts["Status Display"], values=status_qty_counts["Required QTY"], hole=0.55,
-        marker=dict(colors=[DONUT_COLORS.get(s, "#9CA3AF") for s in status_qty_counts["Status Display"]]))])
-    fig2.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=340)
-    st.plotly_chart(fig2, width='stretch')
+    details_display = details.copy()
+    if "Order Create Date" in details_display.columns:
+        details_display["Order Create Date"] = details_display["Order Create Date"].dt.strftime("%d/%m/%Y")
+    if "Start Ship Date" in details_display.columns:
+        details_display["Start Ship Date"] = details_display["Start Ship Date"].dt.strftime("%d/%m/%Y")
 
-st.markdown("#### Backlog by Start Ship Date (Pcs. แยกตามสถานะ)")
-ship_daily_status = (
-    df_backlog.dropna(subset=["Start Ship Date"])
-    .groupby([df_backlog["Start Ship Date"].dt.date, "Status Display"])["Required QTY"]
-    .sum()
-    .reset_index()
-    .rename(columns={"Start Ship Date": "Date"})
-    .sort_values("Date")
-)
-fig4 = go.Figure()
-for status in STATUS_DISPLAY_ORDER:
-    s_df = ship_daily_status[ship_daily_status["Status Display"] == status]
-    if s_df.empty:
-        continue
-    fig4.add_trace(go.Bar(x=s_df["Date"], y=s_df["Required QTY"], name=status,
-                           marker_color=DONUT_COLORS.get(status, "#9CA3AF")))
-fig4.update_layout(height=420, margin=dict(t=10, b=10, l=10, r=10), barmode="stack",
-                    legend=dict(orientation="h", y=1.1), yaxis=dict(title="Pcs."), xaxis=dict(title="Start Ship Date"))
-st.plotly_chart(fig4, width='stretch')
+    st.caption(f"แสดง {len(details_display):,} แถว")
+    st.dataframe(details_display, width='stretch', height=420, hide_index=True)
+
+    excel_bytes = to_excel_bytes(details_display)
+    st.download_button("⬇️ Export Table Details (Excel)", data=excel_bytes,
+                        file_name="backlog_items_details.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    st.markdown("---")
+
+    # ---------------------------------------------------------------------------
+    # PART 4: DASHBOARD (CHARTS)
+    # ---------------------------------------------------------------------------
+    st.markdown('<div class="section-title">Part 4 · Dashboard</div>', unsafe_allow_html=True)
+    st.caption("ข้อมูลในทุกกราฟด้านล่างนับเฉพาะ Backlog **ที่เกินกำหนดส่งแล้ว** เช่นกัน")
+
+    col1, col2 = st.columns(2)
+
+    status_order_counts = df_backlog.groupby("Status Display")["Order No."].nunique().reset_index(name="Unique Orders")
+    status_qty_counts = df_backlog.groupby("Status Display")["Required QTY"].sum().reset_index(name="Required QTY")
+
+    with col1:
+        st.markdown("#### Backlog Orders by Status")
+        fig = go.Figure(data=[go.Pie(
+            labels=status_order_counts["Status Display"], values=status_order_counts["Unique Orders"], hole=0.55,
+            marker=dict(colors=[DONUT_COLORS.get(s, "#9CA3AF") for s in status_order_counts["Status Display"]]))])
+        fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=340)
+        st.plotly_chart(fig, width='stretch')
+
+    with col2:
+        st.markdown("#### Backlog QTY by Status")
+        fig2 = go.Figure(data=[go.Pie(
+            labels=status_qty_counts["Status Display"], values=status_qty_counts["Required QTY"], hole=0.55,
+            marker=dict(colors=[DONUT_COLORS.get(s, "#9CA3AF") for s in status_qty_counts["Status Display"]]))])
+        fig2.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=340)
+        st.plotly_chart(fig2, width='stretch')
+
+    st.markdown("#### Backlog by Start Ship Date (Pcs. แยกตามสถานะ)")
+    ship_daily_status = (
+        df_backlog.dropna(subset=["Start Ship Date"])
+        .groupby([df_backlog["Start Ship Date"].dt.date, "Status Display"])["Required QTY"]
+        .sum()
+        .reset_index()
+        .rename(columns={"Start Ship Date": "Date"})
+        .sort_values("Date")
+    )
+    fig4 = go.Figure()
+    for status in STATUS_DISPLAY_ORDER:
+        s_df = ship_daily_status[ship_daily_status["Status Display"] == status]
+        if s_df.empty:
+            continue
+        fig4.add_trace(go.Bar(x=s_df["Date"], y=s_df["Required QTY"], name=status,
+                               marker_color=DONUT_COLORS.get(status, "#9CA3AF")))
+    fig4.update_layout(height=420, margin=dict(t=10, b=10, l=10, r=10), barmode="stack",
+                        legend=dict(orientation="h", y=1.1), yaxis=dict(title="Pcs."), xaxis=dict(title="Start Ship Date"))
+    st.plotly_chart(fig4, width='stretch')
